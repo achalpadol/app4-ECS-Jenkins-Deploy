@@ -1,0 +1,331 @@
+pipeline {
+
+    agent any
+
+    environment {
+
+        AWS_REGION = 'ap-south-1'
+        AWS_ACCOUNT_ID = '552940445807'
+
+        ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        ECR_REGISTRY_URL = "https://${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        ECS_CLUSTER = 'employee-cluster'
+
+        // =========================================================
+        // App-1 images
+        // =========================================================
+
+        APP_IMAGE_DEV  = 'app-4-frontend-dev'
+        APP_IMAGE_QA   = 'app-4-frontend-qa'
+        APP_IMAGE_UAT  = 'app-4-frontend-uat'
+        APP_IMAGE_PROD = 'app-4-frontend-prod'
+
+        // AWS credentials
+        AWS_CREDENTIALS = 'aws-credentials'
+
+        // Docker build context
+        BUILD_CONTEXT    = './frontend'
+        PROXY_DOCKERFILE = './frontend/Dockerfile'
+    }
+
+    parameters {
+
+        choice(
+            name: 'Environment',
+            choices: ['dev', 'qa', 'uat', 'prod'],
+            description: 'Select the deployment environment'
+        )
+    }
+
+    stages {
+
+        // =========================================================
+        // DEV
+        // =========================================================
+
+        stage('Dev - Build & Push') {
+
+            when {
+                expression {
+                    params.Environment == 'dev'
+                }
+            }
+
+            steps {
+
+                script {
+
+                    buildAndPush(
+                        "${env.APP_IMAGE_DEV}",
+                        "${env.BUILD_CONTEXT}"
+                    )
+                }
+            }
+        }
+
+        // =========================================================
+        // QA
+        // =========================================================
+
+        stage('Promote Dev to QA') {
+            when {
+                expression {
+                    params.Environment == 'qa'
+                }
+            }
+
+            steps {
+
+                script {
+
+                    promoteImage(
+                        "${env.APP_IMAGE_DEV}",
+                        "${env.APP_IMAGE_QA}"
+                    )
+                }
+            }
+        }
+
+        // =========================================================
+        // UAT
+        // =========================================================
+
+        stage('Promote QA to UAT') {
+            when {
+                expression {
+                    params.Environment == 'uat'
+                }
+            }
+
+            steps {
+
+                script {
+
+                    promoteImage(
+                        "${env.APP_IMAGE_QA}",
+                        "${env.APP_IMAGE_UAT}"
+                    )
+                }
+            }
+        }
+
+        // =========================================================
+        // PROD APPROVAL
+        // =========================================================
+
+        stage('Approval for Prod Deployment') {
+
+            when {
+                expression {
+                    params.Environment == 'prod'
+                }
+            }
+
+            steps {
+
+                input(
+                    message: 'Promote UAT image to PROD?',
+                    ok: 'Proceed'
+                )
+            }
+        }
+
+        // =========================================================
+        // PROD
+        // =========================================================
+
+        stage('Promote UAT to PROD') {
+            when {
+                expression {
+                    params.Environment == 'prod'
+                }
+            }
+
+            steps {
+
+                script {
+
+                    promoteImage(
+                        "${env.APP_IMAGE_UAT}",
+                        "${env.APP_IMAGE_PROD}"
+                    )
+                }
+            }
+        }
+
+        // =========================================================
+        // DEPLOY FRONTEND
+        // =========================================================
+
+        stage('Deploy frontend') {
+
+            steps {
+
+                script {
+
+                    //def proxyService
+
+                    //if (params.Environment == 'dev') {
+
+                        //proxyService = 'proxy-task-service-dev'
+
+                   // }
+                    //else if (params.Environment == 'qa') {
+
+                        //proxyService = 'proxy-task-service-uat'
+
+                    //}
+                   // else if (params.Environment == 'uat') {
+
+                       // proxyService = 'proxy-task-service-qa'
+
+                    //}
+                    //else if (params.Environment == 'prod') {
+
+                        //proxyService = 'proxy-task-service-prod'
+                    //}
+
+                    deployToECS(
+                        './frontend/proxy-task-definition.json',
+                        'proxy-task-definition',
+                        'proxy-service-dev'
+                    )
+                }
+            }
+        }
+    }
+
+    // =============================================================
+    // POST
+    // =============================================================
+
+    post {
+
+        always {
+
+            deleteDir()
+        }
+    }
+}
+
+
+// =================================================================
+// FUNCTION 1 - BUILD AND PUSH
+// =================================================================
+
+def buildAndPush(String APP_IMAGE, String BUILD_CONTEXT) {
+
+    def image = docker.build(
+        "${env.ECR_REGISTRY}/${APP_IMAGE}:${env.GIT_COMMIT}",
+        "${BUILD_CONTEXT}"
+    )
+
+    docker.withRegistry(
+        "${env.ECR_REGISTRY_URL}",
+        "ecr:${env.AWS_REGION}:${env.AWS_CREDENTIALS}"
+    ) {
+
+        image.push()
+    }
+}
+
+
+// =================================================================
+// FUNCTION 2 - PROMOTE IMAGE
+// =================================================================
+
+def promoteImage(String sourceImage, String targetImage) {
+
+    // =============================================================
+    // Pull source image from ECR
+    // =============================================================
+
+    docker.withRegistry(
+        "${env.ECR_REGISTRY_URL}",
+        "ecr:${env.AWS_REGION}:${env.AWS_CREDENTIALS}"
+    ) {
+
+        docker.image(
+            "${env.ECR_REGISTRY}/${sourceImage}:${env.GIT_COMMIT}"
+        ).pull()
+    }
+
+
+    // =============================================================
+    // Tag source image with target environment
+    // =============================================================
+
+    sh """
+        docker tag \\
+        ${env.ECR_REGISTRY}/${sourceImage}:${env.GIT_COMMIT} \\
+        ${env.ECR_REGISTRY}/${targetImage}:${env.GIT_COMMIT}
+    """
+
+
+    // =============================================================
+    // Push target image to ECR
+    // =============================================================
+
+    docker.withRegistry(
+        "${env.ECR_REGISTRY_URL}",
+        "ecr:${env.AWS_REGION}:${env.AWS_CREDENTIALS}"
+    ) {
+
+        docker.image(
+            "${env.ECR_REGISTRY}/${targetImage}:${env.GIT_COMMIT}"
+        ).push()
+    }
+}
+
+
+// =================================================================
+// TASK DEFINITION FUNCTION
+// =================================================================
+
+def deployToECS(
+    String taskDefinitionFile,
+    String taskFamily,
+    String ecsService
+) {
+
+    def environment = params.Environment
+    def commitId = env.GIT_COMMIT
+    def region = env.AWS_REGION
+    def cluster = env.ECS_CLUSTER
+
+    // Replace placeholders
+
+    sh """
+        sed -i 's/\\\${ENV}/${environment}/g' ${taskDefinitionFile}
+        sed -i 's/\\\${COMMIT_ID}/${commitId}/g' ${taskDefinitionFile}
+    """
+
+
+    // =============================================================
+    // Register ECS task definition
+    // =============================================================
+
+    def taskRevision = sh(
+        script: """
+            aws ecs register-task-definition \\
+                --cli-input-json file://${taskDefinitionFile} \\
+                --region ${region} \\
+                --query 'taskDefinition.revision' \\
+                --output text
+        """,
+        returnStdout: true
+    ).trim()
+
+
+    // =============================================================
+    // Update ECS service
+    // =============================================================
+
+    sh """
+        aws ecs update-service \\
+            --cluster ${cluster} \\
+            --service ${ecsService} \\
+            --task-definition ${taskFamily}:${taskRevision} \\
+            --region ${region}
+    """
+}

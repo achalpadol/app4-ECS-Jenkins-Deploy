@@ -1,0 +1,283 @@
+pipeline {
+    agent any
+    environment {
+        AWS_REGION = 'ap-south-1'
+        AWS_ACCOUNT_ID = '552940445807'
+        ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        ECR_REGISTRY_URL = "https://${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+    
+        // =========================================================
+        // Database images
+        // =========================================================
+
+        DATABASE_IMAGE_DEV  = 'app-4-db-dev'
+        DATABASE_IMAGE_QA   = 'app-4-db-qa'
+        DATABASE_IMAGE_UAT  = 'app-4-db-uat'
+        DATABASE_IMAGE_PROD = 'app-4-db-prod'
+
+        // AWS credentials
+        AWS_CREDENTIALS = 'aws-credentials'
+
+        // Database Docker build context
+        BUILD_CONTEXT = './db'
+        DATABASE_DOCKERFILE = './db/Dockerfile'
+    }
+
+    parameters {
+
+        choice(
+            name: 'Environment',
+            choices: ['dev', 'qa', 'uat', 'prod'],
+            description: 'Select the deployment environment'
+        )
+    }
+
+    stages {
+
+        // =========================================================
+        // DEV
+        // =========================================================
+
+        stage('Dev - Build & Push Database') {
+
+            when {
+                expression {
+                    params.Environment == 'dev'
+                }
+            }
+
+            steps {
+
+                script {
+
+                    buildAndPush(
+                        "${env.DATABASE_IMAGE_DEV}",
+                        "${env.BUILD_CONTEXT}"
+                    )
+                }
+            }
+        }
+
+        // =========================================================
+        // QA
+        // =========================================================
+
+        stage('Promote Database Dev to QA') {
+
+            when {
+                expression {
+                    params.Environment == 'qa'
+                }
+            }
+
+            steps {
+
+                script {
+
+                    promoteImage(
+                        "${env.DATABASE_IMAGE_DEV}",
+                        "${env.DATABASE_IMAGE_QA}"
+                    )
+                }
+            }
+        }
+
+        // =========================================================
+        // UAT
+        // =========================================================
+
+        stage('Promote Database QA to UAT') {
+
+            when {
+                expression {
+                    params.Environment == 'uat'
+                }
+            }
+
+            steps {
+
+                script {
+
+                    promoteImage(
+                        "${env.DATABASE_IMAGE_QA}",
+                        "${env.DATABASE_IMAGE_UAT}"
+                    )
+                }
+            }
+        }
+
+        // =========================================================
+        // PROD APPROVAL
+        // =========================================================
+
+        stage('Approval for Database Prod Deployment') {
+
+            when {
+                expression {
+                    params.Environment == 'prod'
+                }
+            }
+
+            steps {
+
+                input(
+                    message: 'Promote Database UAT image to PROD?',
+                    ok: 'Proceed'
+                )
+            }
+        }
+
+        // =========================================================
+        // PROD
+        // =========================================================
+
+        stage('Promote Database UAT to PROD') {
+
+            when {
+                expression {
+                    params.Environment == 'prod'
+                }
+            }
+
+            steps {
+
+                script {
+
+                    promoteImage(
+                        "${env.DATABASE_IMAGE_UAT}",
+                        "${env.DATABASE_IMAGE_PROD}"
+                    )
+                }
+            }
+        }
+    }
+        stage('Deploy DB') {
+
+            steps {
+
+                script {
+
+                    deployToECS(
+                        'db-task-definition.json',
+                        'db-task-definition',
+                        'db-service-dev'
+                    )
+                }
+            }
+        }
+
+    // =============================================================
+    // POST
+    // =============================================================
+
+    post {
+
+        always {
+
+            deleteDir()
+        }
+    }
+    
+}
+
+// =================================================================
+// FUNCTION 1 - BUILD AND PUSH DATABASE IMAGE
+// =================================================================
+
+def buildAndPush(String DATABASE_IMAGE, String BUILD_CONTEXT) {
+
+    def image = docker.build(
+        "${env.ECR_REGISTRY}/${DATABASE_IMAGE}:${env.GIT_COMMIT}",
+        "-f ${env.DATABASE_DOCKERFILE} ${BUILD_CONTEXT}"
+    )
+
+    docker.withRegistry(
+        "${env.ECR_REGISTRY_URL}",
+        "ecr:${env.AWS_REGION}:${env.AWS_CREDENTIALS}"
+    ) {
+
+        image.push()
+    }
+}
+
+// =================================================================
+// FUNCTION 2 - PROMOTE DATABASE IMAGE
+// =================================================================
+
+def promoteImage(String sourceImage, String targetImage) {
+
+    // =============================================================
+    // Pull source database image from ECR
+    // =============================================================
+
+    docker.withRegistry(
+        "${env.ECR_REGISTRY_URL}",
+        "ecr:${env.AWS_REGION}:${env.AWS_CREDENTIALS}"
+    ) {
+
+        docker.image(
+            "${env.ECR_REGISTRY}/${sourceImage}:${env.GIT_COMMIT}"
+        ).pull()
+    }
+
+    // =============================================================
+    // Tag source image for target environment
+    // =============================================================
+
+    sh """
+        docker tag \
+        ${env.ECR_REGISTRY}/${sourceImage}:${env.GIT_COMMIT} \
+        ${env.ECR_REGISTRY}/${targetImage}:${env.GIT_COMMIT}
+    """
+
+    // =============================================================
+    // Push target database image to ECR
+    // =============================================================
+
+    docker.withRegistry(
+        "${env.ECR_REGISTRY_URL}",
+        "ecr:${env.AWS_REGION}:${env.AWS_CREDENTIALS}"
+    ) {
+
+        docker.image(
+            "${env.ECR_REGISTRY}/${targetImage}:${env.GIT_COMMIT}"
+        ).push()
+    }
+}
+    
+// TAsk definition function
+
+def deployToECS(String taskDefinitionFile, String taskFamily, String ecsService) {
+
+    def environment = params.Environment
+    def commitId = env.GIT_COMMIT
+    def region = env.AWS_REGION
+    def cluster = env.ECS_CLUSTER
+
+    // Replace placeholders
+    sh """
+        sed -i 's/\\\${ENV}/${environment}/g' ${taskDefinitionFile}
+        sed -i 's/\\\${COMMIT_ID}/${commitId}/g' ${taskDefinitionFile}
+    """
+
+    // Register ECS task definition
+    def taskRevision = sh(
+        script: """
+            aws ecs register-task-definition \
+                --cli-input-json file://${taskDefinitionFile} \
+                --region ${region} \
+                --query 'taskDefinition.revision' \
+                --output text
+        """,
+        returnStdout: true
+    ).trim()
+
+    // Update ECS service
+    sh """
+        aws ecs update-service \
+            --cluster ${cluster} \
+            --service ${ecsService} \
+            --task-definition ${taskFamily}:${taskRevision} \
+            --region ${region}
+    """
+}

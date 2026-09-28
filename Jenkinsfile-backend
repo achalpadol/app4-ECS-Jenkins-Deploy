@@ -1,0 +1,300 @@
+
+pipeline {
+    agent any
+
+    environment {
+        AWS_REGION = 'ap-south-1'
+        AWS_ACCOUNT_ID = credentials('aws-account-id')
+        ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        ECR_REGISTRY_URL = "https://${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+        ECS_CLUSTER = 'employee-cluster'
+
+        // =========================================================
+        // Backend images
+        // =========================================================
+
+        BACKEND_IMAGE_DEV  = 'app-4-backend-dev'
+        BACKEND_IMAGE_QA   = 'app-4-backend-qa'
+        BACKEND_IMAGE_UAT  = 'app-4-backend-uat'
+        BACKEND_IMAGE_PROD = 'app-4-backend-prod'
+
+        // AWS credentials
+        AWS_CREDENTIALS = 'aws-credentials'
+
+        // Backend Docker build context
+        BUILD_CONTEXT = './backend'
+        BACKEND_DOCKERFILE = './backend/Dockerfile'
+    }
+
+    parameters {
+
+        choice(
+            name: 'Environment',
+            choices: ['dev', 'qa', 'uat', 'prod'],
+            description: 'Select the deployment environment'
+        )
+    }
+
+    stages {
+
+        // =========================================================
+        // DEV
+        // =========================================================
+
+        stage('Dev - Build & Push Backend') {
+
+            when {
+                expression {
+                    params.Environment == 'dev'
+                }
+            }
+
+            steps {
+
+                script {
+
+                    buildAndPush(
+                        "${env.BACKEND_IMAGE_DEV}",
+                        "${env.BUILD_CONTEXT}"
+                    )
+                }
+            }
+        }
+
+        // =========================================================
+        // QA
+        // =========================================================
+
+        stage('Promote Backend Dev to QA') {
+
+            when {
+                expression {
+                    params.Environment == 'qa'
+                }
+            }
+
+            steps {
+
+                script {
+
+                    promoteImage(
+                        "${env.BACKEND_IMAGE_DEV}",
+                        "${env.BACKEND_IMAGE_QA}"
+                    )
+                }
+            }
+        }
+
+        // =========================================================
+        // UAT
+        // =========================================================
+
+        stage('Promote Backend QA to UAT') {
+
+            when {
+                expression {
+                    params.Environment == 'uat'
+                }
+            }
+
+            steps {
+
+                script {
+
+                    promoteImage(
+                        "${env.BACKEND_IMAGE_QA}",
+                        "${env.BACKEND_IMAGE_UAT}"
+                    )
+                }
+            }
+        }
+
+        // =========================================================
+        // PROD APPROVAL
+        // =========================================================
+
+        stage('Approval for Backend Prod Deployment') {
+
+            when {
+                expression {
+                    params.Environment == 'prod'
+                }
+            }
+
+            steps {
+
+                input(
+                    message: 'Promote Backend UAT image to PROD?',
+                    ok: 'Proceed'
+                )
+            }
+        }
+
+        // =========================================================
+        // PROD
+        // =========================================================
+
+        stage('Promote Backend UAT to PROD') {
+
+            when {
+                expression {
+                    params.Environment == 'prod'
+                }
+            }
+
+            steps {
+
+                script {
+
+                    promoteImage(
+                        "${env.BACKEND_IMAGE_UAT}",
+                        "${env.BACKEND_IMAGE_PROD}"
+                    )
+                }
+            }
+        }
+
+        // =========================================================
+        // DEPLOY BACKEND TO ECS
+        // =========================================================
+
+        stage('Deploy DB') {
+
+            steps {
+
+                script {
+
+                    deployToECS(
+                        './backend/backend-task-definition.json',
+                        'backend-task-definition',
+                        'backend-service-dev'
+                    )
+                }
+            }
+        }
+    }
+
+    // =============================================================
+    // POST
+    // =============================================================
+
+    post {
+
+        always {
+
+            deleteDir()
+        }
+    }
+}
+
+
+// =================================================================
+// FUNCTION 1 - BUILD AND PUSH BACKEND IMAGE
+// =================================================================
+
+def buildAndPush(String BACKEND_IMAGE, String BUILD_CONTEXT) {
+
+    def image = docker.build(
+        "${env.ECR_REGISTRY}/${BACKEND_IMAGE}:${env.GIT_COMMIT}",
+        "${BUILD_CONTEXT}"
+    )
+
+    docker.withRegistry(
+        "${env.ECR_REGISTRY_URL}",
+        "ecr:${env.AWS_REGION}:${env.AWS_CREDENTIALS}"
+    ) {
+
+        image.push()
+    }
+}
+
+
+// =================================================================
+// FUNCTION 2 - PROMOTE BACKEND IMAGE
+// =================================================================
+
+def promoteImage(String sourceImage, String targetImage) {
+
+    // =============================================================
+    // Pull source backend image from ECR
+    // =============================================================
+
+    docker.withRegistry(
+        "${env.ECR_REGISTRY_URL}",
+        "ecr:${env.AWS_REGION}:${env.AWS_CREDENTIALS}"
+    ) {
+
+        docker.image(
+            "${env.ECR_REGISTRY}/${sourceImage}:${env.GIT_COMMIT}"
+        ).pull()
+    }
+
+    // =============================================================
+    // Tag source image for target environment
+    // =============================================================
+
+    sh """
+        docker tag \
+        ${env.ECR_REGISTRY}/${sourceImage}:${env.GIT_COMMIT} \
+        ${env.ECR_REGISTRY}/${targetImage}:${env.GIT_COMMIT}
+    """
+
+    // =============================================================
+    // Push target backend image to ECR
+    // =============================================================
+
+    docker.withRegistry(
+        "${env.ECR_REGISTRY_URL}",
+        "ecr:${env.AWS_REGION}:${env.AWS_CREDENTIALS}"
+    ) {
+
+        docker.image(
+            "${env.ECR_REGISTRY}/${targetImage}:${env.GIT_COMMIT}"
+        ).push()
+    }
+}
+
+
+// =================================================================
+// TASK DEFINITION FUNCTION
+// =================================================================
+
+def deployToECS(String taskDefinitionFile, String taskFamily, String ecsService) {
+
+    def environment = params.Environment
+    def commitId    = env.GIT_COMMIT
+    def region      = env.AWS_REGION
+    def cluster     = env.ECS_CLUSTER
+
+    // Replace placeholders
+
+    sh """
+        sed -i 's/\\\${ENV}/${environment}/g' ${taskDefinitionFile}
+        sed -i 's/\\\${COMMIT_ID}/${commitId}/g' ${taskDefinitionFile}
+    """
+
+    // Register ECS task definition
+
+    def taskRevision = sh(
+        script: """
+            aws ecs register-task-definition \
+                --cli-input-json file://${taskDefinitionFile} \
+                --region ${region} \
+                --query 'taskDefinition.revision' \
+                --output text
+        """,
+        returnStdout: true
+    ).trim()
+
+    // Update ECS service
+
+    sh """
+        aws ecs update-service \
+            --cluster ${cluster} \
+            --service ${ecsService} \
+            --task-definition ${taskFamily}:${taskRevision} \
+            --region ${region}
+    """
+}
+
