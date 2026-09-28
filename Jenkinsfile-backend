@@ -158,7 +158,7 @@ pipeline {
         // =========================================================
         // DEPLOY BACKEND TO ECS
         // =========================================================
-
+/*
         stage('Deploy DB') {
 
             steps {
@@ -174,7 +174,7 @@ pipeline {
             }
         }
     }
-
+*/
     // =============================================================
     // POST
     // =============================================================
@@ -259,7 +259,7 @@ def promoteImage(String sourceImage, String targetImage) {
 // =================================================================
 // TASK DEFINITION FUNCTION
 // =================================================================
-
+/*
 def deployToECS(String taskDefinitionFile, String taskFamily, String ecsService) {
 
     def environment = params.Environment
@@ -297,4 +297,4 @@ def deployToECS(String taskDefinitionFile, String taskFamily, String ecsService)
             --region ${region}
     """
 }
-
+*/
