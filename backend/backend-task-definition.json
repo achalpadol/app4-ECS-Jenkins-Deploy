@@ -1,0 +1,88 @@
+{
+  
+  "containerDefinitions": [
+    {
+      "name": "Main",
+      "image": "552940445807.dkr.ecr.ap-south-1.amazonaws.com/app-4-backend-${ENV}:${COMMIT_ID}",
+      "cpu": 0,
+      "portMappings": [
+        {
+          "containerPort": 8000,
+          "hostPort": 8000,
+          "protocol": "tcp",
+          "name": "main-8000-tcp",
+          "appProtocol": "http"
+        }
+      ],
+      "essential": true,
+      "environment": [
+        {
+          "name": "PG_PORT",
+          "value": "5432"
+        },
+        {
+          "name": "ADDRESS",
+          "value": "0.0.0.0:8000"
+        },
+        {
+          "name": "PG_DBNAME",
+          "value": "postgres"
+        },
+        {
+          "name": "PG_HOST",
+          "value": "app4-db.ecs.employee.local"
+        },
+        {
+          "name": "PG_PASSWORD",
+          "value": "mysecretpassword"
+        },
+        {
+          "name": "RUST_LOG",
+          "value": "debug"
+        },
+        {
+          "name": "PG_USER",
+          "value": "postgres"
+        }
+      ],
+      "environmentFiles": [],
+      "mountPoints": [],
+      "volumesFrom": [],
+      "ulimits": [],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/backend-task-definition",
+          "awslogs-create-group": "true",
+          "awslogs-region": "ap-south-1",
+          "awslogs-stream-prefix": "ecs"
+        },
+        "secretOptions": []
+      },
+      "systemControls": []
+    }
+  ],
+  "family": "backend-task-definition",
+  "executionRoleArn": "arn:aws:iam::552940445807:role/ecsTaskExecutionRole",
+  "networkMode": "awsvpc",
+  "revision": 7,
+  "volumes": [],
+  "status": "ACTIVE",
+  
+  "placementConstraints": [],
+  "compatibilities": [
+    "EC2",
+    "FARGATE",
+    "MANAGED_INSTANCES"
+  ],
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "1024",
+  "memory": "3072"
+  
+}

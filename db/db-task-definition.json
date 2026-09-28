@@ -1,0 +1,40 @@
+{
+  "name": "Main",
+  "image": "552940445807.dkr.ecr.ap-south-1.amazonaws.com/app-4-db-${ENV}:{COMMIT_ID}",
+  "cpu": 0,
+  "portMappings": [
+    {
+      "containerPort": 5432,
+      "hostPort": 5432,
+      "protocol": "tcp",
+      "name": "main-5432-tcp",
+      "appProtocol": "http"
+    }
+  ],
+  "essential": true,
+  "environment": [
+    {
+      "name": "PG_PASSWORD",
+      "value": "mysecretpassword"
+    },
+    {
+      "name": "PG_DBNAME",
+      "value": "postgres"
+    }
+  ],
+  "environmentFiles": [],
+  "mountPoints": [],
+  "volumesFrom": [],
+  "ulimits": [],
+  "logConfiguration": {
+    "logDriver": "awslogs",
+    "options": {
+      "awslogs-group": "/ecs/db-task-definition",
+      "awslogs-create-group": "true",
+      "awslogs-region": "ap-south-1",
+      "awslogs-stream-prefix": "ecs"
+    },
+    "secretOptions": []
+  },
+  "systemControls": []
+}
