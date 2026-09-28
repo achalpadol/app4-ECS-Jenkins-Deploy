@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: db-config
-  namespace: eks-4
+  
 data:
   PG_DBNAME: postgres
   PG_HOST: db
